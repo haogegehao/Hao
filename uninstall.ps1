@@ -11,6 +11,16 @@ $Root     = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $TaskName = 'PppoeHotspotRelay-DHCP'
 $NatName  = 'PppoeHotspotRelayNat'
 
+# 从 config.json 读取网关, 推导热点网段前缀。
+# 网段是可配置的 (见 README「修改网段」), 所以不能写死。
+$CfgFile = Join-Path $Root 'config.json'
+$GwPrefix = if (Test-Path $CfgFile) {
+    try {
+        $g = (Get-Content $CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json).gateway
+        $g -replace '\.\d+$', '.*'
+    } catch { '192.168.137.*' }
+} else { '192.168.137.*' }
+
 function Say($m, $c = 'Gray') { Write-Host $m -ForegroundColor $c }
 function Head($m) { Write-Host ""; Write-Host "===== $m =====" -ForegroundColor Cyan }
 
@@ -19,7 +29,7 @@ Say "pppoe-hotspot-relay  卸载程序" 'White'
 # ---------------------- 安全确认 ----------------------
 Head "[0/6] 安全确认"
 $phone = Get-NetNeighbor -ErrorAction SilentlyContinue |
-         Where-Object { $_.IPAddress -like '192.168.137.*' -and $_.State -ne 'Unreachable' `
+         Where-Object { $_.IPAddress -like $GwPrefix -and $_.State -ne 'Unreachable' `
                         -and $_.LinkLayerAddress -notlike 'FF-*' }
 if ($phone) {
     Say "检测到热点上仍有设备连接:" 'Yellow'

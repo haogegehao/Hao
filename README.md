@@ -96,6 +96,54 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 改完重新跑一次 `install.ps1` 即可生效。
 
+## 修改网段
+
+默认占用 `192.168.137.0/24`。**Windows 移动热点本身会使用这个网段**，Hyper-V 的
+Default Switch 同样占用它，两者可能冲突。如果你的上级网络也在这个网段内，必须换一个。
+
+**好消息：只需改 `config.json` 一处。** `install.ps1` 会从 `gateway` 自动推导 NAT 网段
+（末位归零 + `/24`），无需改动脚本：
+
+```powershell
+$cfg  = Get-Content .\config.json -Raw | ConvertFrom-Json
+$pool = ($cfg.gateway -replace '\.\d+$', '.0') + '/24'   # 脚本内部就是这么算的
+```
+
+### 步骤
+
+**1. 编辑 `config.json`**，换成新网段（以 `10.20.30.0/24` 为例）：
+
+```json
+{
+  "gateway": "10.20.30.1",
+  "pool_start": "10.20.30.100",
+  "pool_end": "10.20.30.200"
+}
+```
+
+**2. 重新执行 `install.ps1`**（会先移除旧 WinNat 与旧防火墙规则，再按新网段重建）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+**3. 验证**：
+
+```powershell
+Get-NetNat | Format-Table Name, InternalIPInterfaceAddressPrefix, Active
+Get-NetUDPEndpoint -LocalPort 67        # LocalAddress 应为新的 gateway
+```
+
+### 注意事项
+
+- **子网掩码固定 `/24`**，请保持 `gateway` 与 `pool_*` 在同一个 `/24` 内。
+- **地址池不要包含网关地址**。例如 gateway 为 `10.20.30.1`，池从 `.100` 起。
+- **避开冲突网段**：`192.168.137.0/24`（移动热点 + Hyper-V 默认），以及上级网络
+  正在使用的网段。用 `route print` 或 `Get-NetRoute -AddressFamily IPv4` 可查看现有路由。
+- 改完需让热点上的设备**重新获取地址**。手机上若残留旧网段地址，先在手机上
+  「忘记」该 WiFi 再重连。
+- 想彻底改回默认值：编辑 `config.json` 后重跑 `install.ps1` 即可，无需先卸载。
+
 ## 日常使用
 
 ```powershell
@@ -143,8 +191,8 @@ powershell -File .\uninstall.ps1
 
 ## 已知限制
 
-- **占用 `192.168.137.0/24` 网段**。如果你的上级网络也用这个网段，会造成冲突，需要同时修改 `config.json` 里的 `gateway` / `pool_*` 和 `install.ps1` 里的 NAT 网段。
-- **Hyper-V 的 Default Switch 也使用 `192.168.137.0/24`**，两者可能冲突。若同时使用请改网段。
+- **占用 `192.168.137.0/24` 网段**。若上级网络或 Hyper-V 的 Default Switch 也用这个网段会冲突。改网段只需编辑 `config.json` 一处，详见上文「修改网段」。
+- **NAT 网段固定为 `/24`**。`install.ps1` 从 `gateway` 自动推导（末位归零 + `/24`），所以 `gateway` 与 `pool_*` 必须在同一个 `/24` 内。
 - 热点运行在 **5GHz（默认自动选信道）**，部分老旧设备可能搜不到，需要的话在设备管理器里限制网卡频段。
 - 依赖 Windows 移动热点功能，精简版系统可能缺失该组件。
 
