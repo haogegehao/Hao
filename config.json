@@ -1,0 +1,11 @@
+{
+  "ssid": "DormHotspot",
+  "passphrase": "dorm12345678",
+  "gateway": "192.168.137.1",
+  "subnet_mask": "255.255.255.0",
+  "pool_start": "192.168.137.100",
+  "pool_end": "192.168.137.200",
+  "dns": ["223.5.5.5", "114.114.114.114"],
+  "lease_time": 3600,
+  "nat_name": "PppoeHotspotRelayNat"
+}
