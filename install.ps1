@@ -128,20 +128,78 @@ if ($gw.Count -gt 0) {
 
 # ---------------------- WinNat ----------------------
 Head "[4/8] 创建 WinNat 实例"
-foreach ($n in @(Get-NetNat -ErrorAction SilentlyContinue)) {
-    Say ("  移除旧 NAT: {0}" -f $n.Name) 'Yellow'
-    Remove-NetNat -Name $n.Name -Confirm:$false -ErrorAction SilentlyContinue
+
+# WinNat 是独立驱动服务, 创建 NAT 前必须确保它可用
+$natSvc = Get-Service WinNat -ErrorAction SilentlyContinue
+if (-not $natSvc) {
+    Say "  错误: 未找到 WinNat 服务 (Windows NAT Driver)。" 'Red'
+    Say "  该系统可能缺少该组件 (精简版 / LTSC / 组件被清理过)。" 'Red'
+    Say "  尝试启用 Hyper-V 平台:" 'Yellow'
+    Say "    Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All" 'Gray'
+    Say "  或改用 README「其他方案」中的做法。" 'Yellow'
+} else {
+    Say ("  WinNat 服务: {0} / {1}" -f $natSvc.Status, $natSvc.StartType) `
+        $(if ("$($natSvc.Status)" -eq 'Running') { 'Green' } else { 'Yellow' })
+    if ($natSvc.StartType -eq 'Disabled') {
+        Say "  启动类型为 Disabled, 改为 Manual..." 'Yellow'
+        try { Set-Service WinNat -StartupType Manual -ErrorAction Stop } catch {}
+    }
+    if ((Get-Service WinNat).Status -ne 'Running') {
+        Say "  正在启动 WinNat..." 'Yellow'
+        try { Start-Service WinNat -ErrorAction Stop; Start-Sleep -Seconds 2 } catch {
+            Say ("  启动失败: {0}" -f $_.Exception.Message) 'Red'
+        }
+        Say ("  状态: {0}" -f (Get-Service WinNat).Status) 'Cyan'
+    }
 }
+
+# 清理: 只删除本项目的、以及与目标网段冲突的实例。
+# 不无差别删除 —— Hyper-V 的 Default Switch 也依赖 NAT 实例, 删错会影响虚拟机网络。
+foreach ($n in @(Get-NetNat -ErrorAction SilentlyContinue)) {
+    $isOurs = ($n.Name -eq $NatName)
+    $isConflict = ($n.InternalIPInterfaceAddressPrefix -eq $Pool)
+    if ($isOurs -or $isConflict) {
+        Say ("  移除冲突 NAT: {0} ({1})" -f $n.Name, $n.InternalIPInterfaceAddressPrefix) 'Yellow'
+        Remove-NetNat -Name $n.Name -Confirm:$false -ErrorAction SilentlyContinue
+    } else {
+        Say ("  保留其他 NAT 实例: {0} ({1})" -f $n.Name, $n.InternalIPInterfaceAddressPrefix) 'Gray'
+    }
+}
+
+$natOk = $false
 try {
     New-NetNat -Name $NatName -InternalIPInterfaceAddressPrefix $Pool -ErrorAction Stop | Out-Null
     Say ("  已创建 NAT: {0}  内部网段 {1}" -f $NatName, $Pool) 'Green'
 } catch {
     Say ("  创建失败: {0}" -f $_.Exception.Message) 'Red'
-    Say "  若为「已存在」类错误, 可忽略。" 'Yellow'
 }
-Get-NetNat -ErrorAction SilentlyContinue |
-    Format-Table Name, InternalIPInterfaceAddressPrefix, Active -Auto | Out-String |
-    ForEach-Object { Say $_ }
+
+# 回读验证 —— 不能只看 New-NetNat 有没有抛异常
+Start-Sleep -Seconds 2
+$natNow = @(Get-NetNat -ErrorAction SilentlyContinue)
+if (@($natNow | Where-Object { $_.Name -eq $NatName }).Count -gt 0) { $natOk = $true }
+
+if ($natNow.Count -gt 0) {
+    $natNow | Format-Table Name, InternalIPInterfaceAddressPrefix, Active -Auto | Out-String |
+        ForEach-Object { Say $_ }
+}
+
+if (-not $natOk) {
+    Write-Host ""
+    Say "  WinNat 实例未创建成功。诊断与修复:" 'Red'
+    if (@(Get-NetNat -ErrorAction SilentlyContinue).Count -eq 0) {
+        Say "  Get-NetNat 返回空, 但创建也失败 —— 典型原因:" 'Yellow'
+        Say "    · WinNat 服务未能启动 (见上面 [4/8] 的状态输出)" 'Gray'
+        Say "    · 该系统缺少 Windows NAT Driver 组件" 'Gray'
+    } else {
+        Say "  机器上已有其他 NAT 实例占用网段 (常见于 Hyper-V Default Switch," 'Yellow'
+        Say "  它默认也用 192.168.137.0/24)。WinNat 限制一个网段只能有一个实例。" 'Yellow'
+        Say "  >>> 解决办法: 改网段。" 'Cyan'
+        Say "      编辑 config.json 里的 gateway / pool_start / pool_end (如 10.20.30.x)," 'Cyan'
+        Say "      然后重新运行本脚本。详见 README「修改网段」。" 'Cyan'
+    }
+    Say "  一键诊断: powershell -File .\scripts\fix-netnat.ps1" 'Cyan'
+}
 
 # ---------------------- 防火墙 ----------------------
 Head "[5/8] 配置防火墙规则"
@@ -210,10 +268,36 @@ $checks = @(
     @{N='PPPoE 上行';    C={ @(Get-NetIPAddress -AddressFamily IPv4 -EA SilentlyContinue | Where-Object {$_.InterfaceAlias -match '宽带|PPPoE' -and $_.IPAddress -notlike '169.*'}).Count -gt 0 }}
 )
 $allOk = $true
+$failHints = @{
+    'WinNat 实例' = @(
+        '添加-网段冲突最常见: Hyper-V 的 Default Switch 默认也占 192.168.137.0/24,',
+        '        而 WinNat 限制一个网段只能有一个实例。改网段即可 (编辑 config.json 后重跑本脚本)。',
+        '      · 也可能是 WinNat 服务没起来, 或该系统缺少 Windows NAT Driver。',
+        '      · 一键诊断: powershell -File .\scripts\fix-netnat.ps1'
+    )
+    'DHCP 监听 67' = @(
+        'DHCP 未绑定到网关地址。检查计划任务是否运行:',
+        '        Get-ScheduledTask -TaskName ''PppoeHotspotRelay-DHCP''',
+        '      若任务正常, 看日志 logs\dhcp.log 里 socket 绑定那一行。'
+    )
+    '热点网关 IP' = @(
+        '热点未真正启动。确认无线网卡支持承载网络:',
+        '        netsh wlan show drivers  (「支持的承载网络」必须为「是」)'
+    )
+    'PPPoE 上行' = @(
+        '没有处于已连接状态的 PPPoE 连接。请先在「网络连接」里拨号。'
+    )
+    '防火墙规则' = @(
+        '规则未创建。以管理员身份重跑本脚本。'
+    )
+}
 foreach ($c in $checks) {
     $ok = & $c.C
     if (-not $ok) { $allOk = $false }
     Say ("  [{0}] {1}" -f $(if ($ok) { '✓' } else { '✗' }), $c.N) $(if ($ok) { 'Green' } else { 'Red' })
+    if (-not $ok -and $failHints.ContainsKey($c.N)) {
+        foreach ($h in $failHints[$c.N]) { Say ("      $h") 'Yellow' }
+    }
 }
 
 Head "[8/8] 完成"
@@ -226,5 +310,7 @@ if ($allOk) {
 }
 Say ""
 Say ("日志: {0}" -f (Join-Path $Root 'logs\dhcp.log')) 'Cyan'
+Say "      (DHCP 服务器写的是文件, 不输出到终端。文件要到手机首次获取 IP 时才建立)" 'Gray'
 Say ("状态: powershell -File `"{0}`"" -f (Join-Path $Root 'scripts\status.ps1')) 'Cyan'
 Say ("卸载: powershell -File `"{0}`"" -f (Join-Path $Root 'uninstall.ps1')) 'Cyan'
+Say ("诊断: powershell -File `"{0}`"" -f (Join-Path $Root 'scripts\fix-netnat.ps1')) 'Cyan'

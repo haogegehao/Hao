@@ -203,6 +203,108 @@ If the PPPoE link drops and reconnects, just re-run `install.ps1` (it is idempot
   client and an AP at the same time
 - Check the driver: `netsh wlan show drivers` — "Hosted network supported" must be `Yes`
 
+### The final check shows "WinNat 实例" unchecked
+
+In `install.ps1` step `[7/8]`, the `WinNat 实例` (WinNat instance) line shows ✗, meaning the NAT
+layer was not created. In order of likelihood:
+
+**1. Subnet conflict (most common, especially on Windows 11)**
+
+WinNat allows **only one NAT instance per subnet**, and **Hyper-V's Default Switch uses
+`192.168.137.0/24` by default**. The two inevitably collide.
+
+```powershell
+Get-NetNat | Format-Table Name, InternalIPInterfaceAddressPrefix, Active
+```
+
+- Another instance listed (its name often contains `Default Switch`) on `192.168.137.0/24`
+  → change the subnet.
+- The list is **empty but creation still fails** → it is not a conflict; see points 2 and 3.
+
+**Changing the subnet** (one edit, see "Changing the subnet" above):
+
+```json
+{
+  "gateway": "10.20.30.1",
+  "pool_start": "10.20.30.100",
+  "pool_end": "10.20.30.200"
+}
+```
+
+Then re-run `install.ps1`.
+
+**2. The WinNat service is not running**
+
+```powershell
+Get-Service WinNat | Format-List Status, StartType
+# If Stopped
+Start-Service WinNat
+# If Disabled
+Set-Service WinNat -StartupType Manual; Start-Service WinNat
+```
+
+**3. The system lacks the Windows NAT Driver**
+
+```powershell
+Get-Service WinNat -ErrorAction SilentlyContinue
+```
+
+An empty result means the component is missing. This is common on **trimmed / LTSC builds or
+systems where an "optimizer" removed components**. WinNat is installed together with the
+Hyper-V platform:
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All
+```
+
+Reboot, then run `install.ps1` again. If it still fails, use one of the approaches in
+"Alternative approaches" above.
+
+**4. One-shot diagnosis**
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\fix-netnat.ps1
+```
+
+This script walks through the WinNat service, existing NAT instances, subnet conflicts and the
+gateway address, cleans up conflicting instances, recreates the instance, and then reads it
+back to verify. **It only removes this project's instance and instances conflicting with the
+target subnet — it never touches Hyper-V's own NAT.**
+
+### I can't find the log / nothing is printed to the terminal
+
+**The log is a file, not terminal output.** The installer prints the log *path*, not its content:
+
+```
+日志: E:\...\pppoe-hotspot-relay\logs\dhcp.log
+```
+
+Two things that commonly cause confusion:
+
+1. **The file does not exist until the first client requests an IP.** The DHCP server only
+   writes when it receives a request, so right after installing there is nothing to find —
+   connect a phone once first.
+2. **The DHCP server runs in the background as a Scheduled Task under SYSTEM**
+   (`pythonw.exe`), with no console window. Its output will never appear in your terminal.
+
+To read it:
+
+```powershell
+Get-Content .\logs\dhcp.log -Tail 30 -Wait     # -Wait follows the file live
+```
+
+Or just run `scripts\status.ps1`, which prints the last 15 log lines for you.
+
+A successful exchange looks like this:
+
+```
+DISCOVER  be:3b:19:f4:13:9e REDMI-K80 -> OFFER 192.168.137.100   [bcast, uni:192.168.137.100]
+REQUEST   be:3b:19:f4:13:9e REDMI-K80 -> ACK 192.168.137.100   ★ 完成   [bcast, uni:192.168.137.100]
+```
+
+If you see `DISCOVER ... OFFER` but no `REQUEST ... ACK`, the OFFER never reached the phone —
+usually a socket binding problem or firewall blocking (see above).
+
 ## Alternative approaches
 
 If this project does not fit your situation, these are the realistic alternatives.

@@ -192,6 +192,103 @@ powershell -File .\uninstall.ps1
 - 检查驱动：`netsh wlan show drivers` 里"支持的承载网络"必须是"是"
 
 
+### 安装最后一步「WinNat 实例」没打勾
+
+`install.ps1` 的 `[7/8] 验证服务链` 里 `WinNat 实例` 显示 ✗，说明 NAT 层没建起来。
+按可能性排序：
+
+**1. 网段冲突（最常见，尤其在 Win11 上）**
+
+WinNat 限制**一个网段只能有一个 NAT 实例**，而 **Hyper-V 的 Default Switch 默认也占用
+`192.168.137.0/24`**。两者必然打架。
+
+```powershell
+Get-NetNat | Format-Table Name, InternalIPInterfaceAddressPrefix, Active
+```
+
+- 如果这里有别的实例（名字常含 `Default Switch`），且网段是 `192.168.137.0/24` → 换网段。
+- 如果这里是**空的但创建仍失败** → 问题不在冲突，往下看第 2、3 条。
+
+**换网段的做法**（改一处即可，见「修改网段」）：
+
+```json
+{
+  "gateway": "10.20.30.1",
+  "pool_start": "10.20.30.100",
+  "pool_end": "10.20.30.200"
+}
+```
+
+改完重跑 `install.ps1`。
+
+**2. WinNat 服务没起来**
+
+```powershell
+Get-Service WinNat | Format-List Status, StartType
+# 若为 Stopped
+Start-Service WinNat
+# 若为 Disabled
+Set-Service WinNat -StartupType Manual; Start-Service WinNat
+```
+
+**3. 系统缺少 Windows NAT Driver**
+
+```powershell
+Get-Service WinNat -ErrorAction SilentlyContinue
+```
+
+返回空说明该系统没有这个组件。常见于**精简版 / LTSC / 被优化工具清理过组件**的系统。
+WinNat 随 Hyper-V 平台一起安装：
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All
+```
+
+重启后再跑 `install.ps1`。若仍不行，改用 README「其他方案」里的做法。
+
+**4. 一键诊断**
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\fix-netnat.ps1
+```
+
+这个脚本会依次检查 WinNat 服务、现有 NAT 实例、网段冲突、网关地址，
+尝试清理冲突实例并重建，然后回读验证。**它只删除本项目的实例和与目标网段冲突的实例，
+不会碰 Hyper-V 自己的 NAT。**
+
+### 看不到日志 / 终端里没有输出
+
+**日志写的是文件，不是终端。** 安装脚本最后打印的是日志**路径**，不是日志内容：
+
+```
+日志: E:\...\pppoe-hotspot-relay\logs\dhcp.log
+```
+
+两个容易困惑的点：
+
+1. **这个文件在手机首次获取 IP 之前不存在。** DHCP 服务器只在收到请求时才写日志，
+   所以刚装完去找是找不到的 —— 先让手机连一次。
+2. **DHCP 服务器由计划任务以 SYSTEM 身份在后台运行**（`pythonw.exe`），
+   它是无窗口的，所以终端里永远不会看到它的输出。
+
+查看日志：
+
+```powershell
+Get-Content .\logs\dhcp.log -Tail 30 -Wait     # -Wait 可实时跟踪
+```
+
+或直接用 `scripts\status.ps1`，它会带出最近 15 行日志。
+
+日志里一条成功的记录长这样：
+
+```
+DISCOVER  be:3b:19:f4:13:9e REDMI-K80 -> OFFER 192.168.137.100   [bcast, uni:192.168.137.100]
+REQUEST   be:3b:19:f4:13:9e REDMI-K80 -> ACK 192.168.137.100   ★ 完成   [bcast, uni:192.168.137.100]
+```
+
+只有 `DISCOVER ... OFFER` 而没有 `REQUEST ... ACK`，说明 OFFER 没送达手机，
+通常是 socket 绑定问题或防火墙拦截（见上文）。
+
 ## 其他方案
 
 如果本项目不适合你的情况，这些是现实可选的替代路径。
