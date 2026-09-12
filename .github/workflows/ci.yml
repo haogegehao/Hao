@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    name: Python 语法检查 / Python syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python / Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 编译所有 .py (语法检查) / Compile all .py
+        run: python -m compileall -q dhcp_server.py scripts/
+
+      - name: 校验 JSON 配置格式 / Validate JSON config
+        run: python -c "import json,glob,sys; [json.load(open(f,encoding='utf-8')) for f in glob.glob('**/*.json',recursive=True)]; print('JSON OK')"
+
+  powershell:
+    name: PowerShell 语法检查 / PowerShell syntax
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 PowerShell 7 / Set up pwsh
+        uses: PowerShell/PowerShell-For-GitHub-Actions@master
+        with:
+          pwsh-version: "7.4.6"
+
+      - name: 安装 Python / Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+
+      # 关键: 用 PS 5.1 自带的解析器校验语法, 并检查 .ps1 是否带 UTF-8 BOM。
+      # 含非 ASCII 的 .ps1 缺少 BOM 时, PS 5.1 会按系统 ANSI 代码页解码,
+      # 中文字符串被解坏 -> 语法错误。这个坑开发时实际踩到过。
+      - name: 校验 .ps1 语法与 BOM / Check syntax and BOM
+        run: python scripts/check_ps_syntax.py
+
+      - name: PSScriptAnalyzer 静态检查
+        shell: pwsh
+        run: |
+          $findings = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error, ParseError
+          if ($findings) {
+            $findings | Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize -Wrap
+            Write-Error "PSScriptAnalyzer 发现 $($findings.Count) 个错误级问题"
+            exit 1
+          }
+          Write-Host "PSScriptAnalyzer: 无错误级问题"
