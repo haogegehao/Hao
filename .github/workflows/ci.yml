@@ -30,15 +30,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装 PowerShell 7 / Set up pwsh
-        uses: PowerShell/PowerShell-For-GitHub-Actions@master
-        with:
-          pwsh-version: "7.4.6"
+      # 不安装 PowerShell 7: windows-latest runner 已预装, 且
+      # PowerShell/PowerShell-For-GitHub-Actions 这个 action 引用不可靠
+      # (曾导致 job 在 "Set up job" 阶段直接失败)。
+      # 脚本用 shell: pwsh 走预装的 PowerShell 7 即可。
 
       - name: 安装 Python / Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: 显示 PowerShell 版本 / Show PowerShell versions
+        shell: pwsh
+        run: |
+          Write-Host "pwsh (PS 7): $($PSVersionTable.PSVersion)"
+          Write-Host "--- 校验用的 PS 5.1 ---"
+          $ps51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          Write-Host "存在: $(Test-Path $ps51)"
 
       - name: 安装 PSScriptAnalyzer
         shell: pwsh
@@ -55,10 +63,9 @@ jobs:
       - name: PSScriptAnalyzer 静态检查
         shell: pwsh
         run: |
-          $findings = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error, ParseError
-          if ($findings) {
+          $findings = @(Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error, ParseError)
+          if ($findings.Count -gt 0) {
             $findings | Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize -Wrap
             Write-Error "PSScriptAnalyzer 发现 $($findings.Count) 个错误级问题"
-            exit 1
           }
           Write-Host "PSScriptAnalyzer: 无错误级问题"
